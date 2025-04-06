@@ -1,0 +1,318 @@
+#### Please Do Not Distribute 
+## Jackstraw test for principal component analysis
+
+We are interested in the classic experiments on cell cycle regulation in yeast.
+
+> Spellman PT, Sherlock G, Zhang MQ, Iyer VR et al. Comprehensive identification of cell cycle-regulated genes of the yeast Saccharomyces cerevisiae by microarray hybridization. Mol Biol Cell 1998 Dec;9(12):3273-97. PMID: 9843569
+
+The dataset can be downloaded from GEO with an accession id **GDS39**.
+
+```{r setup, echo=T, results='hide', message=F, warning=F}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+ BiocManager::install("Biobase")
+ BiocManager::install("GEOquery")
+
+library(Biobase)
+library(GEOquery)
+library(data.table)
+library(tidyverse)
+library(RColorBrewer)
+# creating heatmaps
+library(gplots)
+# for the jackstraw tests
+library(jackstraw)
+# calcuating q-values and FDRs
+library(qvalue)
+# combining ggplots
+library(patchwork)
+set.seed(1)
+#Loading a GDS file with GEOquery
+dat <- getGEO('GDS39', destdir=".")
+
+# lets look at the class and the mode of this variable, dat
+class(dat)
+mode(dat)
+
+# look at ATTRIBUTES of meta data, such that you know what information are available
+attributes(Meta(dat))
+
+# save and selectively look at meta data
+metadat <- Meta(dat)
+metadat$description
+timepoints <- seq(0,6.5,by=0.5)
+```
+
+## Overview of the yeast cell cycle data
+
+We can access the gene expression data using Table. See how we look at column names and row names to ensure what observations and variables are available. 
+
+```{r geo2}
+# we have a relatively large dataset, that will likely difficult to see at once
+dim(Table(dat))
+
+# look at a small portion of gene expression 
+# the first 2 columns are identifiers for genes
+Table(dat)[1:10,1:5]
+
+# access the whole row by not specifying the column number
+Table(dat)[1,]
+
+# column names are sample IDs 
+colnames(Table(dat))
+
+geneexp.dt <- as.data.table(Table(dat))
+geneexp.dt[1:6,]
+gene_id <- geneexp.dt$IDENTIFIER
+geneexp.dt <- geneexp.dt[,-c(1,2)]
+
+# e.g., calling a particular gene
+geneexp.dt[gene_id == "FHL1", ]
+```
+
+## Normalization and SVD/PCA
+
+Remove the rows with missing values
+
+```{r na}
+# remove the rows with missing values
+rows.na <- apply(geneexp.dt,1,function(x) sum(is.na(x)))
+geneexp.complete <- geneexp.dt[rows.na == 0,]
+# make sure that you do the same with gene IDs
+gene_id <- gene_id[rows.na == 0]
+```
+
+We normalize the data according to Alter, Brown, and Botstein (2000) Singular value decomposition for genome-wide expression data processing and modeling (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC27718/).
+
+```{r normalize}
+# remove the first eigenmatrix from the raw data
+# similar to mean centering the data (check row means before and after)
+raw.svd = svd(geneexp.complete)
+ec = geneexp.complete - (raw.svd$d[1] * raw.svd$u[,1] %*% t(raw.svd$v[,1]))
+
+raw_mean = apply(geneexp.complete,1,mean)
+ec_mean = apply(ec,1,mean)
+
+par(mfrow=c(2,1))
+hist(raw_mean, 100)
+hist(ec_mean, 100)
+
+# take the log transformation
+# the data is squred so that log transformation can be applied 
+elv = log(ec^2)
+elv.svd = svd(elv)
+
+# remove the first eigenmatrix from the log-transformed data
+# reducing heteroskedasticity (mean-variance relationship)
+eclv = elv - (elv.svd$d[1] * elv.svd$u[,1] %*% t(elv.svd$v[,1]))
+en = sign(ec) * sqrt(exp(eclv))
+
+# homogeneity of variance is desired
+ec_mean = apply(ec,1,mean)
+ec_var = apply(ec,1,var)
+en_mean = apply(en,1,mean)
+en_var = apply(en,1,var)
+
+# see the more flat-shape, after the above step
+par(mfrow=c(1,1))
+plot(ec_mean,ec_var,pch=20)
+plot(en_mean,en_var,pch=20)
+
+# 11th array is an outlier, remove the 11th array
+en = en[,-11]
+timepoints = timepoints[-11]
+```
+
+Alternatively, one may take different ways to normalize the data, for example, center and scale the data. It won't reproduce the original analysis, but you can attempt to achieve the similar goals are the original analysis:
+
+```{r normalize-centerscale}
+geneexp.norm = geneexp.complete[,-11]
+geneexp.norm = t(scale(t(geneexp.norm), center=TRUE, scale=TRUE))
+```
+
+Finally, we apply the SVD on the centered and normalized data without any missing values. 
+
+```{r svd}
+# original analysis - alter et al.
+m = dim(en)[1]
+n = dim(en)[2]
+
+# apply SVD
+geneexp.svd <- svd(en)
+pve <- geneexp.svd$d^2 / sum(geneexp.svd$d^2)
+
+# look at the percent variance explained
+plot(1:n, pve)
+
+# look at the 1st and 2nd PCs
+plot(timepoints, geneexp.svd$v[,1])
+# look at the percent variance explained
+plot(timepoints, geneexp.svd$v[,2])
+```
+## Principal Components over Time
+
+We want to plot the PCs over time. However, we also want to evaluate and visualize how PCs are changing over time. So we fit a cubic spline over the 1st and 2nd PCs, separately. Then, we plot them all together:
+
+```{r ggplot2}
+PC1.spl = smooth.spline(timepoints, geneexp.svd$v[,1], df=5)
+PC2.spl = smooth.spline(timepoints, geneexp.svd$v[,2], df=5)
+
+par(mfrow=c(1,1), mar=c(4,4,4,4), mgp=c(2.2,1,0))
+plot(timepoints, geneexp.svd$v[,1], pch=16, main="(a)", ylim=c(-.55,.45), xlab="Time points (hours)", ylab="PC Values")
+points(timepoints, geneexp.svd$v[,2], pch=16, col="red")
+lines(PC1.spl, lty="dashed", col="black")
+lines(PC2.spl, lty="dashed", col="red")
+legend("bottomright", cex=1, inset=0, ncol=1, c("1st PC","2nd PC"), pch=c(16,16), col=c("black","red"))
+```
+
+## Testing for Cell Cycles
+
+We apply the jackstraw tests on the top 2 PCs to estimate p-values of association between genes and cell cycles.
+
+```{r jackstraw1}
+geneexp.jackstraw = jackstraw_pca(as.matrix(en), r=2, s=round(m*.1), B=10)
+hist(geneexp.jackstraw$p.value,10)
+hist(geneexp.jackstraw$obs.stat,10)
+
+qplot(geneexp.jackstraw$p.value, geom="histogram")
+qplot(geneexp.jackstraw$obs.stat, geom="histogram", xlim=c(0,100))
+qplot(as.vector(geneexp.jackstraw$null.stat), geom="histogram", xlim=c(0,30))
+
+# lets combine 2 histograms, severly limiting the x-axis
+obs.hist <- qplot(geneexp.jackstraw$obs.stat, geom="histogram", xlim=c(0,30))
+null.hist <- qplot(as.vector(geneexp.jackstraw$null.stat), geom="histogram", xlim=c(0,30))
+print(obs.hist / null.hist)
+```
+
+## Heatmaps using gplots
+
+A heatmap represents the individual values in a matrix as colors. It allows the large table of numeric values to be visualized.
+
+```{r Heatmaps}
+sum(qvalue(geneexp.jackstraw$p.value)$qvalue < .01)
+
+## Heatmap of probes with 1%
+qval = qvalue(geneexp.jackstraw$p.value)$qvalue
+ind = which(qval < .01)        
+dat.ind = geneexp.norm[ind,]
+qval.ind = qval[ind]
+
+# create a heatmap with ``gplots``.
+my_palette <- colorRampPalette(c("blue", "gray", "yellow"))(n = 100)
+heatmap.2(geneexp.norm, Rowv=TRUE, Colv=FALSE, scale="none", dendrogram="none", trace="none", density.info="none",col=my_palette)
+
+```
+
+## Testing for each of two PCs 
+
+Instead of testing for significance w.r.t. to the top 2 PCs, we are interested in identifying genes that are related to the 1st PCs. And of course, for the 2nd PC. We can do this by specifying the number of significant PCs (2 in this case), and specifying which PC you would like to test for. 
+
+```{r jackstraw2}
+pval.pc1 = jackstraw_pca(geneexp.norm, r1=1, r=2, s=round(m*.1), B=10)$p.value
+pval.pc2 = jackstraw_pca(geneexp.norm, r1=2, r=2, s=round(m*.1), B=10)$p.value
+
+# lets combine 2 histograms, severly limiting the x-axis
+pc1.hist <- qplot(pval.pc1, geom="histogram")
+pc2.hist <- qplot(pval.pc2, geom="histogram")
+print(pc1.hist + pc2.hist)
+
+q.pc1 <- qvalue(pval.pc1)
+q.pc2 <- qvalue(pval.pc2)
+
+q.pc1$pi0
+q.pc2$pi0
+
+sum(q.pc1$qvalue < .01)
+sum(q.pc2$qvalue < .01)
+```
+
+
+## Jackstraw test for cluster membership
+
+#### Example of ```mtcars```
+For example, let's consider a [mtcars](https://stat.ethz.ch/R-manual/R-devel/library/datasets/html/mtcars.html) dataset of `M=32` cars and their characteristics from 1974 Motor Trend US magazine. By applying clustering to `M=32` cars, we can obtain groups of cars that exhibit similar characteristics. Let's imagine how `M=32` cars are classified into `K=2` clusters using K-means clustering. After clustering is done, our goal is then to evaluate (e.g., calculate statistical significance) how well these cars have been placed into 2 different cluters.
+
+In a large and noisy dataset, some data points may have been incorrectly clustered or contains no significant signals. The jackstraw test for cluster membership helps evaluate whether data points are correctly assigned to their given clusters.
+
+We are conducting hypothesis testing of association between a cluster center and an individual data point (of `N` dimensions)^[For computing F-statistics, the full model uses the cluster centers (and possibly other covariates). The null model excludes cluster centers.]. This provides p-values and posterior inclusion probabilities (PIPs), which you can use to identify data points that are reliably associated with that cluster.
+
+## R code
+
+Let's look at how to do this, using the R package ```jackstraw```. The key function is `jackstraw_kmeans` calculating the jackstraw p-values when applying K-means clustering. Also, `jackstraw_pam` and `jackstraw_MiniBatchKmeans` are for [Partitioning Around Medoids (PAM)](https://en.wikipedia.org/wiki/K-medoids#Partitioning_Around_Medoids_(PAM)) and [Mini Batch K-means clustering](https://cran.r-project.org/web/packages/ClusterR/vignettes/the_clusterR_package.html).
+
+We process ```mtcars``` (a built-in dataset in R) for clustering. Remove 2 binary columns and normalize each column^[You may not want different scales of variables to impact clustering.].:
+
+```{r mtcars_data}
+
+# see the summary of mtcars dataset
+head(mtcars)
+
+# remove two binary columns
+car <- as.matrix(mtcars[,-c(8,9)])
+zcar <- apply(car, 2, function(x) (x-mean(x))/sd(x))
+```
+
+In this example, another R package ```anocva``` is used determine the number of clusters. However, this completely depends on your data, applications, and analysis goals. Please carry out careful exploratory data analysis.:
+
+```{r anocva_nClust}
+# install.packages("anocva")
+library(anocva)
+myKmeans = function(dist, k){
+  return(kmeans(dist, k, iter.max = 100, nstart = 10)$cluster)
+  }
+distMatrix = as.matrix(dist(zcar))
+distMatrix = checkRange01(distMatrix)
+nClust(distMatrix, p = 1, maxClust = 10, myKmeans)
+```
+
+We apply K-means clustering to the normalized ```mtcars``` dataset. The function `kmeans` cluster `32` cars in this dataset. The jackstraw test for cluster membership with `B=1000` iteration is applied. We choose `s=3`, approximately 10% of the cars:
+
+```{r jackstraw_kmeans_cluster, cache=TRUE}
+# set a rng seed for reproducibility
+set.seed(1)
+# apply k-means clustering
+kmeans.car = kmeans(zcar, centers=2, nstart = 10, iter.max = 100)
+
+library(jackstraw)
+# apply k-means clustering
+jackstraw.out <- jackstraw_kmeans(dat=zcar,
+                                  kmeans.dat=kmeans.car,
+                                  s=3,
+                                  B=1000,
+                                  nstart = 10,
+                                  iter.max = 100)
+jackstraw.out$pip <- pip(jackstraw.out$p.F)
+```
+
+Here are a few histograms to look at. For example, one may look at observed and null F-statistics for diagnostic reasons. We could use PIPs to filter or select some cars that are not good fits for that clusters.:
+
+```{r vis, out.width="50%", cache=TRUE}
+library(ggplot2)
+library(tibble)
+ggplot(as_tibble(jackstraw.out$p.F),aes(value)) +
+  geom_histogram(binwidth=.1,center = .05) +
+  labs(title = "P-values of cluster memberships")
+
+ggplot(as_tibble(jackstraw.out$pip),aes(value)) +
+  geom_histogram(binwidth=.1,center = .05) +
+  labs(title = "Posterior inclusion probabilities")
+
+ggplot(as_tibble(jackstraw.out$F.obs),aes(value)) +
+  geom_histogram(binwidth=20,center = 10) +
+  labs(title = "Observed F-statistics")
+```
+
+## Cluster stability and related challenges
+There has been important research focusing on cluster stability, asking two related questions:
+
+* are these clusters stable/reliable?
+* how many clusters exist in this data?
+
+This leads to statistical measures^[See silhouette analysis, gap statistics, and so on.] as `K` would be varied (e.g., from 2 to a large number), allowing us to choose an optimal value for `K`. Generally speaking, instead of examining cluster structure or stability, the jackstraw focuses on reliability of individual data points. The jackstraw requires `K` to be specified.  
+
+## P-value troubleshooting
+Always, examine the histogram of p-values. Behaviors of p-values are important, and even allow us to diagnose the problems with data, algorithms, or hyperparameters. Please see a blog post by David Robinson on [how to interpret a p-value histogram](http://varianceexplained.org/statistics/interpreting-pvalue-histogram/)^[[Cached](https://archive.vn/kLeX9)].
+
+Posterior inclusion probabilities (PIPs) are empirical Bayesian measures, that are calculated from the set of p-values. It's simply `1 - lfdr` (local false discovery rate). For an introduction, see a blog post by Michael Love on [Intuition behind local FDR](https://biodatascience.github.io/compbio/test/localfdr.html)^[[Cached](https://archive.vn/20ejg)]. There are several ways^[qvalue, locfdr, fdrtool, etc] to estimate `lfdr`. By default, we use the [qvalue](https://www.bioconductor.org/packages/release/bioc/html/qvalue.html) package.
+
+You may get into an error due to unability to estimate a proportion of null hypotheses, `pi0`^[See the [qvalue Github issue](https://github.com/StoreyLab/qvalue/issues/19)]. Underneath, `qvalue::pi0est` is used and in some cases, an optional argument `lambda` may help. Also, try to set `pi0=1` manually or estimate `pi0` in some other ways.
