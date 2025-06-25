@@ -1,0 +1,458 @@
+---
+title: "Final project"
+author: "Julia Szkóp"
+date: "2025-06-23"
+output: html_document
+---
+```{r}
+cran_pkgs <- c("ggplot2", "dplyr", "pheatmap", "Seurat")
+install_if_missing(cran_pkgs)
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+bioc_pkgs <- c("clusterProfiler", "org.Hs.eg.db")
+BiocManager::install(bioc_pkgs, ask = FALSE)
+```
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(pheatmap)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggplot2)
+
+expr_data <- read.delim(
+  "GSE85241_dataset.csv.gz",
+  header = TRUE,
+  row.names = 1,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+pancreas <- CreateSeuratObject(
+  expr_data,
+  project = "MuraroPancreas",
+  min.cells = 3,
+  min.features = 500
+)
+pancreas$donor <- factor(sub("-.*", "", pancreas$orig.ident))
+
+```
+
+##  Data Overview
+```{r}
+dim(expr_data)
+summary(pancreas$nFeature_RNA)
+summary(pancreas$nCount_RNA)
+```
+##  Workflow
+```{r}
+pancreas <- NormalizeData(pancreas)
+pancreas <- FindVariableFeatures(pancreas, selection.method = "vst", nfeatures = 2000)
+length(VariableFeatures(pancreas))
+
+pancreas <- ScaleData(pancreas)
+pancreas <- RunPCA(pancreas, features = VariableFeatures(pancreas))
+ElbowPlot(pancreas, ndims = 30)
+
+pancreas <- FindNeighbors(pancreas, dims = 1:15)
+pancreas <- FindClusters(pancreas, resolution = 0.2)
+pancreas <- RunTSNE(pancreas, dims = 1:15)
+DimPlot(pancreas, reduction = "tsne", label = TRUE, label.size = 8)
+
+pancreas$orig.ident <- factor(sub("-.*", "", pancreas$orig.ident))
+DimPlot(pancreas, reduction = "tsne", group.by = "orig.ident", label.size = 6)
+```
+## Marker Detection
+```{r}
+markers <- FindAllMarkers(pancreas, only.pos=TRUE, logfc.threshold=0.25, min.pct=0.25)
+markers %>% group_by(cluster) %>% slice_max(n = 10, order_by = avg_log2FC)
+```
+## Cluster Annotation
+```{r}
+new.labels <- c(
+  "alpha", "beta", "acinar", "ductal",
+  "delta", "PP", "mesenchymal",
+  "endothelial_cells", "macrophages"
+)
+names(new.labels) <- levels(pancreas)
+pancreas <- RenameIdents(pancreas, new.labels)
+DimPlot(pancreas, reduction = "tsne", label = TRUE, label.size = 6)
+```
+
+## Clean Gene Names
+```{r}
+old_genes <- rownames(pancreas)
+clean_genes <- sapply(old_genes, function(x) strsplit(x, split = "--|__")[[1]][1])
+rownames(pancreas) <- clean_genes
+head(rownames(pancreas), 20)
+```
+
+## Feature Plots
+```{r}
+FeaturePlot(
+  pancreas,
+  features = c("RGS4","PFKFB2","FRZB","CHN2"),
+  reduction = "tsne",
+  cols = c("lightgray","coral","yellow","lightgreen"),
+  pt.size = 1
+)
+
+FeaturePlot(
+  pancreas,
+  features = c("GHRL","PHGR1","VTN","ANXA13"),
+  reduction = "tsne",
+  cols = c("lightgray","coral"),
+  pt.size = 1
+)
+```
+
+## GO Enrichment for Epsilon Cells
+```{r}
+genes_epsilon <- c("GHRL","ANXA13","PHGR1","ACSL1","FRZB","SPTSSB","ASGR1","HEPACAM2","VTN","SERPINA1")
+entrez_epsilon <- bitr(genes_epsilon, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)$ENTREZID
+ego_mf <- enrichGO(
+  gene = entrez_epsilon,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.2
+)
+dotplot(ego_mf) + ggtitle("GO:MF enrichment – epsilon cell genes")
+```
+
+## GO Enrichment for Immune Cells
+```{r}
+genes_immune <- c("FPR3","C1QA","CCL3","C1QC","LILRB2","MS4A6A","TREM2","RNASE6","OLR1","MPEG1")
+entrez_immune <- bitr(genes_immune, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)$ENTREZID
+ego_mf_immune <- enrichGO(
+  gene = entrez_immune,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.2)
+
+dotplot(ego_mf_immune) + ggtitle("GO:MF enrichment – immune cell genes")
+```
+
+## Sub-clustering Major Populations
+```{r}
+expr_data <- read.delim(
+  "GSE85241_dataset.csv.gz",
+  header = TRUE,
+  row.names = 1,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+pancreas <- CreateSeuratObject(
+  expr_data,
+  project = "MuraroPancreas",
+  min.cells = 3,
+  min.features = 500
+)
+pancreas <- NormalizeData(pancreas)
+pancreas <- FindVariableFeatures(pancreas, selection.method = "vst", nfeatures = 2000)
+length(VariableFeatures(pancreas))
+
+pancreas <- ScaleData(pancreas)
+pancreas <- RunPCA(pancreas, features = VariableFeatures(pancreas))
+ElbowPlot(pancreas, ndims = 30)
+
+pancreas <- FindNeighbors(pancreas, dims = 1:15)
+pancreas <- FindClusters(pancreas, resolution = 0.2)
+pancreas <- RunTSNE(pancreas, dims = 1:15)
+
+new.labels <- c(
+  "alpha", "beta", "acinar", "ductal",
+  "delta", "PP", "mesenchymal",
+  "endothelial_cells", "macrophages"
+)
+names(new.labels) <- levels(pancreas)
+pancreas <- RenameIdents(pancreas, new.labels)
+
+```
+
+```{r}
+
+alpha.sub <- subset(pancreas, idents = "alpha")
+
+alpha.sub <- NormalizeData(alpha.sub)
+alpha.sub <- FindVariableFeatures(alpha.sub, selection.method = "vst", nfeatures = 1000)
+all.genes.alpha <- rownames(alpha.sub)
+alpha.sub <- ScaleData(alpha.sub, features = all.genes.alpha)
+alpha.sub <- RunPCA(alpha.sub, features = VariableFeatures(alpha.sub), npcs = 30)
+
+ElbowPlot(alpha.sub, ndims = 30)
+dims.alpha <- 1:30
+
+alpha.sub <- FindNeighbors(alpha.sub, dims = dims.alpha)
+alpha.sub <- FindClusters(alpha.sub, resolution = 0.2)   
+alpha.sub <- RunUMAP(alpha.sub, dims = dims.alpha)
+
+DimPlot(alpha.sub, reduction = "umap", label = TRUE, pt.size = 0.5, label.size = 6) + ggtitle("Sub-clustering: alpha - cells")
+
+markers_a <- FindAllMarkers(alpha.sub, only.pos=TRUE, logfc.threshold=0.25, min.pct=0.25)
+markers_a %>% group_by(cluster) %>% slice_max(n = 10, order_by = avg_log2FC)
+```
+
+```{r}
+beta.sub <- subset(pancreas, idents = "beta")
+
+beta.sub <- NormalizeData(beta.sub)
+beta.sub <- FindVariableFeatures(beta.sub, selection.method = "vst", nfeatures = 1000)
+all.genes.beta <- rownames(beta.sub)
+beta.sub <- ScaleData(beta.sub, features = all.genes.beta)
+beta.sub <- RunPCA(beta.sub, features = VariableFeatures(beta.sub), npcs = 30)
+
+ElbowPlot(beta.sub, ndims = 30)
+dims.beta <- 1:30
+
+beta.sub <- FindNeighbors(beta.sub, dims = dims.beta)
+beta.sub <- FindClusters(beta.sub, resolution = 0.3)
+beta.sub <- RunUMAP(beta.sub, dims = dims.beta)
+
+DimPlot(beta.sub, reduction = "umap", label = TRUE, pt.size = 0.5, , label.size = 6) + ggtitle("Sub-clustering: beta - cells")
+
+markers_b <- FindAllMarkers(beta.sub, only.pos=TRUE, logfc.threshold=0.25, min.pct=0.25)
+markers_b %>% group_by(cluster) %>% slice_max(n = 10, order_by = avg_log2FC)
+```
+
+```{r}
+old_genes <- rownames(alpha.sub)
+
+clean_genes <- sapply(old_genes, function(x) strsplit(x, split="--|__")[[1]][1])
+
+rownames(alpha.sub) <- clean_genes
+
+FeaturePlot(object = alpha.sub, features  = c("XIST", "LSAMP", "DGKH", "CTRB1"), reduction = "umap", cols = c("lightgray","red"), pt.size = 1)
+```
+
+
+```{r}
+old_genes <- rownames(beta.sub)
+
+clean_genes <- sapply(old_genes, function(x) strsplit(x, split="--|__")[[1]][1])
+
+rownames(beta.sub) <- clean_genes
+
+FeaturePlot(object = beta.sub, features  = c("DUOX2", "HLA-DQB1", "GDF15", "CRYM"), reduction = "umap", cols = c("lightgray","red"), pt.size = 1)
+```
+## Differential Expression by Sex
+```{r}
+pancreas$donor <- factor( sub("-.*", "", pancreas$orig.ident) )
+
+pancreas$sex <- ifelse(pancreas$donor == "D30", "F", ifelse(pancreas$donor == "D29", "M", NA) )
+
+pancreas$sex <- factor(pancreas$sex, levels = c("M","F"))
+
+pancreas_sex <- subset(pancreas, subset = donor %in% c("D29","D30"))
+
+table(pancreas$donor, pancreas$sex)
+
+pancreas_sex$donor <- droplevels(pancreas_sex$donor)
+
+pancreas_sex$sex   <- droplevels(pancreas_sex$sex)
+
+levels(pancreas_sex$donor)  
+
+levels(pancreas_sex$sex)  
+
+pancreas_sex <- NormalizeData(pancreas_sex)
+
+pancreas_sex <- FindVariableFeatures(pancreas_sex, selection.method = "vst", nfeatures = 2000)
+
+pancreas_sex <- ScaleData(pancreas_sex, vars.to.regress = NULL)
+
+pancreas_sex <- RunPCA(pancreas_sex, features = VariableFeatures(pancreas_sex))
+
+ElbowPlot(pancreas_sex, ndims = 30)
+
+pancreas_sex <- FindNeighbors(pancreas_sex, dims = 1:15)
+
+pancreas_sex <- FindClusters(pancreas_sex, resolution = 0.2)
+
+pancreas_sex <- RunTSNE(pancreas_sex, dims = 1:15)
+
+Idents(pancreas_sex) <- "donor"
+
+de_all <- FindMarkers(
+  object          = pancreas_sex,
+  ident.1         = "D30",      
+  ident.2         = "D29",      
+  logfc.threshold = 0.25,
+  min.pct         = 0.1
+)
+```
+
+```{r}
+de_sorted_pos <- de_all[order(de_all$avg_log2FC, decreasing = TRUE), ]
+
+de_sorted_neg <- de_all[order(de_all$avg_log2FC, decreasing = FALSE), ]
+
+de_sig <- de_all[ de_all$p_val_adj < 0.05, ]
+
+length(which(de_all$p_val_adj < 0.05))
+
+genes_F <- rownames(de_sig[ de_sig$avg_log2FC > 0, ])
+
+genes_M <- rownames(de_sig[ de_sig$avg_log2FC < 0, ])
+
+ord_F <- order( de_sig[genes_F, "avg_log2FC"], decreasing = TRUE )
+
+top20_F <- genes_F[ ord_F[1:10] ]
+
+ord_M <- order( de_sig[genes_M, "avg_log2FC"], decreasing = FALSE )
+
+top20_M <- genes_M[ ord_M[1:10] ]
+
+top20_both <- c(top20_F, top20_M)
+
+
+my_palette <- colorRampPalette(c("bisque", "coral",  "blue"))(100)
+
+heatmap_plot <- DoHeatmap(
+  object   = pancreas_sex,
+  features = top20_both,
+  group.by = "donor",       
+  slot     = "data"          
+) +
+  scale_fill_gradientn(
+    colors = my_palette,
+    name   = "Expression\n(log norm)"
+  ) +
+  theme(
+    axis.text.x     = element_blank(),  
+    axis.ticks.x    = element_blank(),
+    panel.grid      = element_blank(),
+    legend.position = "right"
+  )
+
+print(heatmap_plot)
+```
+## Differential Expression by Age
+```{r}
+pancreas$age <- ifelse(pancreas$donor == "D29", "younger",  ifelse(pancreas$donor == "D31", "older", NA) )
+
+pancreas$age <- factor(pancreas$age, levels = c("younger","older"))
+
+pancreas_age <- subset(pancreas, subset = donor %in% c("D29","D31"))
+
+pancreas_age <- subset(pancreas, subset = donor %in% c("D29","D31"))
+
+
+table(pancreas_age$donor, pancreas_age$age)
+
+pancreas_age$donor <- droplevels(pancreas_age$donor)
+pancreas_age$age   <- droplevels(pancreas_age$age)
+
+pancreas_age <- NormalizeData(pancreas_age)
+
+pancreas_age <- FindVariableFeatures(pancreas_age, selection.method = "vst", nfeatures = 2000)
+
+pancreas_age <- ScaleData(pancreas_age, vars.to.regress = NULL)
+
+pancreas_age <- RunPCA(pancreas_age, features = VariableFeatures(pancreas_age))
+
+ElbowPlot(pancreas_age, ndims = 30)
+
+pancreas_age <- FindNeighbors(pancreas_age, dims = 1:15)
+
+pancreas_age <- FindClusters(pancreas_age, resolution = 0.2)
+
+pancreas_age <- RunTSNE(pancreas_age, dims = 1:15)
+
+Idents(pancreas_age) <- "donor"
+
+de_all <- FindMarkers(
+  object          = pancreas_age,
+  ident.1         = "D29",      
+  ident.2         = "D31",      
+  logfc.threshold = 0.25,
+  min.pct         = 0.1
+)
+```
+
+```{r}
+de_sorted_pos <- de_all[order(de_all$avg_log2FC, decreasing = TRUE), ]
+
+de_sorted_neg <- de_all[order(de_all$avg_log2FC, decreasing = FALSE), ]
+
+de_sig <- de_all[ de_all$p_val_adj < 0.05, ]
+
+length(which(de_all$p_val_adj < 0.05))
+
+genes_F <- rownames(de_sig[ de_sig$avg_log2FC > 0, ])
+
+genes_M <- rownames(de_sig[ de_sig$avg_log2FC < 0, ])
+
+ord_F <- order( de_sig[genes_F, "avg_log2FC"], decreasing = TRUE )
+
+top20_F <- genes_F[ ord_F[1:10] ]
+
+ord_M <- order( de_sig[genes_M, "avg_log2FC"], decreasing = FALSE )
+top20_M <- genes_M[ ord_M[1:10] ]
+
+top20_both <- c(top20_F, top20_M)
+
+
+my_palette <- colorRampPalette(c("bisque", "coral",  "blue"))(100)
+
+heatmap_plot <- DoHeatmap(
+  object   = pancreas_age,
+  features = top20_both,
+  group.by = "donor",       
+  slot     = "data"          
+) +
+  scale_fill_gradientn(
+    colors = my_palette,
+    name   = "Expression\n(log norm)"
+  ) +
+  theme(
+    axis.text.x     = element_blank(),  
+    axis.ticks.x    = element_blank(),
+    panel.grid      = element_blank(),
+    legend.position = "right"
+  )
+
+print(heatmap_plot)
+```
+## UMAP
+```{r}
+pancreas <- FindNeighbors(pancreas, dims = 1:17)
+
+pancreas <- FindClusters(pancreas, resolution = 0.6)
+
+table(Idents(pancreas))
+
+pancreas <- RunUMAP(pancreas, dims = 1:17)
+
+DimPlot(pancreas, reduction = "umap", label = TRUE)
+```
+
+```{r}
+old_genes <- rownames(pancreas)
+
+clean_genes <- sapply(old_genes, function(x) strsplit(x, split="--|__")[[1]][1])
+
+rownames(pancreas) <- clean_genes
+```
+
+```{r}
+FeaturePlot(
+  object = pancreas, features  = c("GHRL", "PHGR1", "VTN", "ANXA13"), reduction = "umap", cols = c("lightgray","red"), pt.size = 1)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+

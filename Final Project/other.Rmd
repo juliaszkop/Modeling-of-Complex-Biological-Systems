@@ -1,0 +1,215 @@
+---
+title: "other data"
+author: "Julia Szkóp"
+date: "2025-06-02"
+output: html_document
+---
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("GEOquery")
+install.packages("Seurat")
+install.packages("Matrix")
+```
+
+```{r}
+library(GEOquery)
+
+getGEOSuppFiles("GSE150724", makeDirectory = TRUE)
+
+supp_dir <- "GSE150724"
+files_to_unzip <- list.files(supp_dir, pattern = "\\.gz$", full.names = TRUE)
+lapply(files_to_unzip, gunzip, overwrite = TRUE)  
+```
+
+```{r}
+library(Seurat)
+library(Matrix)
+data_root <- "GSE150724"
+matrix1   <- file.path(data_root, "GSE150724_Donor1_matrix.mtx.gz")
+genes1    <- file.path(data_root, "GSE150724_Donor1_genes.tsv.gz")
+barcodes1 <- file.path(data_root, "GSE150724_Donor1_barcodes.tsv.gz")
+
+matrix2   <- file.path(data_root, "GSE150724_Donor2_matrix.mtx.gz")
+genes2    <- file.path(data_root, "GSE150724_Donor2_genes.tsv.gz")
+barcodes2 <- file.path(data_root, "GSE150724_Donor2_barcodes.tsv.gz")
+
+matrix3   <- file.path(data_root, "GSE150724_Donor3_matrix.mtx.gz")
+genes3    <- file.path(data_root, "GSE150724_Donor3_genes.tsv.gz")
+barcodes3 <- file.path(data_root, "GSE150724_Donor3_barcodes.tsv.gz")
+
+```
+
+```{r}
+
+load_donor <- function(donor_id, data_root = "GSE150724") {
+  mtx_path   <- file.path(data_root, paste0("GSE150724_", donor_id, "_matrix.mtx.gz"))
+  genes_path <- file.path(data_root, paste0("GSE150724_", donor_id, "_genes.tsv.gz"))
+  bc_path    <- file.path(data_root, paste0("GSE150724_", donor_id, "_barcodes.tsv.gz"))
+  
+  mtx_raw <- readMM(gzfile(mtx_path))
+  mtx     <- as(mtx_raw, "CsparseMatrix")
+  
+  genes_df    <- read.delim(gzfile(genes_path), header = FALSE, stringsAsFactors = FALSE)
+  barcodes_df <- read.delim(gzfile(bc_path),    header = FALSE, stringsAsFactors = FALSE)
+  
+  stopifnot(nrow(mtx) == nrow(genes_df), ncol(mtx) == nrow(barcodes_df))
+  
+  rownames(mtx) <- genes_df$V1
+  colnames(mtx) <- barcodes_df$V1
+  
+  CreateSeuratObject(counts = mtx, project = donor_id)
+}
+
+donors <- c("Donor1", "Donor2", "Donor3")
+
+seurat_list <- lapply(donors, load_donor)
+names(seurat_list) <- donors
+
+pancreas <- merge(
+  x = seurat_list[[1]],
+  y = seurat_list[-1],
+  add.cell.ids = donors,
+  project = "GSE150724_all"
+)
+
+
+pancreas
+```
+
+```{r}
+summary(pancreas$nFeature_RNA)
+summary(pancreas$nCount_RNA)
+```
+
+```{r}
+pancreas[["percent.mt"]] <- PercentageFeatureSet(pancreas, pattern = "^MT-")
+pancreas <- subset(pancreas, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 &  percent.mt < 15)
+
+pancreas <- NormalizeData(pancreas)
+pancreas <- FindVariableFeatures(pancreas, selection.method = "vst", nfeatures = 2000)
+length(VariableFeatures(pancreas))
+```
+
+```{r}
+pancreas <- ScaleData(pancreas, vars.to.regress = NULL)
+pancreas <- RunPCA(pancreas, features = VariableFeatures(pancreas))
+ElbowPlot(pancreas, ndims = 30)
+```
+
+```{r}
+pancreas <- FindNeighbors(pancreas, dims = 1:15)
+pancreas <- FindClusters(pancreas, resolution = 0.05)
+
+table(Idents(pancreas))
+
+pancreas <- RunTSNE(pancreas, dims = 1:10)
+
+
+DimPlot(pancreas, reduction = "tsne", label = TRUE)
+```
+
+```{r}
+pancreas <- JoinLayers(pancreas, assay = "RNA")
+
+markers <- FindAllMarkers(
+  object        = pancreas,
+  assay         = "RNA",            
+  slot          = "data",          
+  only.pos       = TRUE,
+  logfc.threshold = 0.25,
+  min.pct        = 0.25
+)
+```
+
+```{r}
+dim(markers)        
+table(markers$cluster) 
+```
+
+```{r}
+top10_markers <- markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 10, order_by = avg_log2FC)
+
+
+top10_markers %>% arrange(cluster, desc(avg_log2FC))
+```
+
+```{r}
+FeaturePlot(
+  object = pancreas, features  = c("GHRL", "PHGR1", "VTN", "ANXA13"), reduction = "tsne", cols = c("lightgray","coral",  "red"), pt.size = 1)
+```
+
+```{r}
+FeaturePlot(
+  object = pancreas, features  = c("FPR3", "C1QA", "CCL3", "OLR1"), reduction = "tsne", cols = c("lightgray","coral", "yellow",  "lightgreen"), pt.size = 1)
+```
+
+```{r}
+FeaturePlot(
+  object = pancreas, features  = c("PPY", "FGB", "CALB1", "MID1"), reduction = "tsne", cols = c("lightgray","coral", "yellow",  "lightgreen"), pt.size = 1)
+```
+
+```{r}
+new.labels <- c(
+  "beta",    # 0 
+  "alpha",     # 1
+  "PP",   # 2
+  "endocrine",   # 3
+  "delta",    # 4
+  "macrophages",       # 5
+  "ductal", # 6
+  "delta ",   # 7
+  "epsilon",  # 8,
+  "stellate",  #9,
+  "acinar" #10
+)
+
+names(new.labels) <- levels(pancreas) 
+pancreas <- RenameIdents(pancreas, new.labels)
+
+DimPlot(pancreas, reduction="tsne", label=TRUE) 
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
